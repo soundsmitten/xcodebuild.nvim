@@ -19,6 +19,16 @@ local config = require("xcodebuild.core.config").options
 local M = {}
 local CANCELLED_CODE = 143
 
+local function perf_log(message)
+  local path = vim.fn.stdpath("cache") .. "/xcodebuild-perf.log"
+  local line = os.date("%Y-%m-%d %H:%M:%S") .. " " .. message
+  vim.fn.writefile({ line }, path, "a")
+end
+
+local function perf_ms(start)
+  return (vim.uv.hrtime() - start) / 1e6
+end
+
 ---Builds and runs the app on device or simulator.
 ---@param waitForDebugger boolean
 ---@param callback function|nil
@@ -65,8 +75,22 @@ function M.build_project(opts, callback)
   local buildId = notifications.start_build_timer(opts.buildForTesting)
   helpers.clear_state()
 
+  local parseCalls = 0
+  local parseTotalMs = 0
+  local parseMaxMs = 0
+
   local on_stdout = function(_, output)
+    local start = vim.uv.hrtime()
     appdata.report = logsParser.parse_logs(output)
+
+    local elapsed = perf_ms(start)
+    parseCalls = parseCalls + 1
+    parseTotalMs = parseTotalMs + elapsed
+    parseMaxMs = math.max(parseMaxMs, elapsed)
+
+    if elapsed > 25 then
+      perf_log(string.format("parse_logs slow %.1fms lines=%d", elapsed, #output))
+    end
   end
 
   local on_exit = function(_, code, _)
@@ -78,15 +102,29 @@ function M.build_project(opts, callback)
       return
     end
 
+    perf_log(string.format(
+      "parse_logs calls=%d total=%.1fms max=%.1fms output=%d errors=%d warnings=%d",
+      parseCalls,
+      parseTotalMs,
+      parseMaxMs,
+      #(appdata.report.output or {}),
+      #(appdata.report.buildErrors or {}),
+      #(appdata.report.buildWarnings or {})
+    ))
+
     if config.restore_on_start then
       appdata.write_report(appdata.report)
     end
 
+    local quickfixStart = vim.uv.hrtime()
     quickfix.set(appdata.report)
+    perf_log(string.format("quickfix.set %.1fms", perf_ms(quickfixStart)))
 
     notifications.stop_build_timer()
     notifications.send_progress("Processing logs...")
+    local logsStart = vim.uv.hrtime()
     logsPanel.set_logs(appdata.report, false, function()
+      perf_log(string.format("logsPanel.set_logs %.1fms", perf_ms(logsStart)))
       notifications.send_build_finished(
         appdata.report,
         buildId,
@@ -95,7 +133,10 @@ function M.build_project(opts, callback)
       )
     end)
 
+    local callbackStart = vim.uv.hrtime()
+    perf_log("callback before")
     util.call(callback, appdata.report)
+    perf_log(string.format("callback after %.1fms", perf_ms(callbackStart)))
 
     events.build_finished(
       opts.buildForTesting or false,
