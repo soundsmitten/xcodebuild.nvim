@@ -123,6 +123,7 @@ local failedTestsCount = 0
 local output = {}
 local buildErrors = {}
 local buildWarnings = {}
+local buildWarningKeys = {}
 local testErrors = {}
 local usesSwiftTesting = false
 local xcresultFilepath = nil
@@ -321,16 +322,19 @@ local function flush_warning(message)
     table.insert(lineData.message, message)
   end
 
-  for _, item in ipairs(buildWarnings) do
-    if
-      item.filepath == lineData.filepath
-      and item.lineNumber == lineData.lineNumber
-      and item.message[1] == lineData.message[1]
-    then
-      return
-    end
+  local key = (lineData.filepath or "")
+    .. "\0"
+    .. tostring(lineData.lineNumber or "")
+    .. "\0"
+    .. (lineData.message and lineData.message[1] or "")
+
+  if buildWarningKeys[key] then
+    lineType = BEGIN
+    lineData = {}
+    return
   end
 
+  buildWarningKeys[key] = true
   table.insert(buildWarnings, lineData)
   lineType = BEGIN
   lineData = {}
@@ -820,6 +824,7 @@ function M.clear()
   output = {}
   buildErrors = {}
   buildWarnings = {}
+  buildWarningKeys = {}
   testErrors = {}
   usesSwiftTesting = false
   xcresultFilepath = nil
