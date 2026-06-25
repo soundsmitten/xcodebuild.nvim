@@ -85,6 +85,22 @@ local constants = require("xcodebuild.core.constants")
 local util = require("xcodebuild.util")
 local testSearch = require("xcodebuild.tests.search")
 
+local function perf_log(message)
+  local path = vim.fn.stdpath("cache") .. "/xcodebuild-perf.log"
+  local line = os.date("%Y-%m-%d %H:%M:%S") .. " " .. message
+  vim.fn.writefile({ line }, path, "a")
+end
+
+local function perf_ms(start)
+  return (vim.uv.hrtime() - start) / 1e6
+end
+
+local function truncate_line(line)
+  line = line or ""
+  line = line:gsub("%s+", " ")
+  return line:sub(1, 180)
+end
+
 -- state machine constants
 local BEGIN = "BEGIN"
 local TEST_START = "TEST_START"
@@ -171,7 +187,10 @@ end
 ---@param message string|nil
 ---@see xcodebuild.tests.explorer
 local function flush_test(message)
+  local perfStart = vim.uv.hrtime()
   debug_print("flush_test", lineData)
+  local testName = lineData.name
+  local testClass = lineData.class
 
   if message then
     table.insert(lineData.message, message)
@@ -231,6 +250,17 @@ local function flush_test(message)
   lastTest = lineData
   lineType = BEGIN
   lineData = {}
+
+  local elapsed = perf_ms(perfStart)
+  if elapsed > 25 then
+    perf_log(string.format(
+      "flush_test slow %.1fms class=%s name=%s tests=%d",
+      elapsed,
+      tostring(testClass),
+      tostring(testName),
+      testsCount
+    ))
+  end
 end
 
 ---Sends error data to the report results.
@@ -239,7 +269,10 @@ end
 ---without flushing the error.
 ---@param message string|nil
 local function flush_error(message)
+  local perfStart = vim.uv.hrtime()
   debug_print("flush_error", lineData)
+  local filepath = lineData.filepath
+  local lineNumber = lineData.lineNumber
   if message then
     table.insert(lineData.message, message)
   end
@@ -260,6 +293,17 @@ local function flush_error(message)
   table.insert(buildErrors, lineData)
   lineType = BEGIN
   lineData = {}
+
+  local elapsed = perf_ms(perfStart)
+  if elapsed > 25 then
+    perf_log(string.format(
+      "flush_error slow %.1fms file=%s line=%s errors=%d",
+      elapsed,
+      tostring(filepath),
+      tostring(lineNumber),
+      #buildErrors
+    ))
+  end
 end
 
 ---Sends warning data to the report results.
@@ -268,7 +312,10 @@ end
 ---without flushing the warning.
 ---@param message string|nil
 local function flush_warning(message)
+  local perfStart = vim.uv.hrtime()
   debug_print("flush_warning", lineData)
+  local filepath = lineData.filepath
+  local lineNumber = lineData.lineNumber
 
   if message then
     table.insert(lineData.message, message)
@@ -287,6 +334,17 @@ local function flush_warning(message)
   table.insert(buildWarnings, lineData)
   lineType = BEGIN
   lineData = {}
+
+  local elapsed = perf_ms(perfStart)
+  if elapsed > 25 then
+    perf_log(string.format(
+      "flush_warning slow %.1fms file=%s line=%s warnings=%d",
+      elapsed,
+      tostring(filepath),
+      tostring(lineNumber),
+      #buildWarnings
+    ))
+  end
 end
 
 ---Sends test error data to the report results.
@@ -296,6 +354,7 @@ end
 ---@param filename string
 ---@param lineNumber number|nil
 local function flush_test_error(filepath, filename, lineNumber)
+  local perfStart = vim.uv.hrtime()
   debug_print("flush_test_error", lineData)
 
   for _, item in ipairs(testErrors) do
@@ -314,6 +373,17 @@ local function flush_test_error(filepath, filename, lineNumber)
     lineNumber = lineNumber,
     message = lineData.message,
   })
+
+  local elapsed = perf_ms(perfStart)
+  if elapsed > 25 then
+    perf_log(string.format(
+      "flush_test_error slow %.1fms file=%s line=%s testErrors=%d",
+      elapsed,
+      tostring(filepath),
+      tostring(lineNumber),
+      #testErrors
+    ))
+  end
 end
 
 ---Flushes the current `lineData` based on `lineType`.
@@ -766,16 +836,39 @@ end
 ---@param logLines string[] Xcode log lines.
 ---@return ParsedReport
 function M.parse_logs(logLines)
+  local parseStart = vim.uv.hrtime()
   local newLines = {}
   local logsPanel = require("xcodebuild.xcode_logs.panel")
   if not next(output) then
+    local clearStart = vim.uv.hrtime()
     logsPanel.clear()
+    local clearElapsed = perf_ms(clearStart)
+    if clearElapsed > 25 then
+      perf_log(string.format("logsPanel.clear slow %.1fms", clearElapsed))
+    end
   end
+
+  local processTotalMs = 0
+  local processMaxMs = 0
+  local processMaxLine = nil
 
   for _, line in ipairs(logLines) do
+    local lineStart = vim.uv.hrtime()
     process_line(line)
+    local elapsed = perf_ms(lineStart)
+    processTotalMs = processTotalMs + elapsed
+
+    if elapsed > processMaxMs then
+      processMaxMs = elapsed
+      processMaxLine = line
+    end
+
+    if elapsed > 25 then
+      perf_log(string.format("process_line slow %.1fms line=%s", elapsed, truncate_line(line)))
+    end
   end
 
+  local outputStart = vim.uv.hrtime()
   if next(output) and next(logLines) then
     output[#output] = output[#output] .. logLines[1]
     newLines = { output[#output] }
@@ -791,9 +884,31 @@ function M.parse_logs(logLines)
   if next(newLines) then
     table.remove(newLines, #newLines)
   end
+  local outputElapsed = perf_ms(outputStart)
 
   if require("xcodebuild.core.config").options.logs.live_logs then
+    local appendStart = vim.uv.hrtime()
     logsPanel.append_log_lines(newLines)
+    local appendElapsed = perf_ms(appendStart)
+    if appendElapsed > 25 then
+      perf_log(string.format("append_log_lines slow %.1fms lines=%d", appendElapsed, #newLines))
+    end
+  end
+
+  local totalElapsed = perf_ms(parseStart)
+  local overhead = totalElapsed - processTotalMs - outputElapsed
+  if totalElapsed > 25 then
+    perf_log(string.format(
+      "parse_logs detail total=%.1fms process=%.1fms maxLine=%.1fms output=%.1fms overhead=%.1fms lines=%d outputSize=%d maxLineText=%s",
+      totalElapsed,
+      processTotalMs,
+      processMaxMs,
+      outputElapsed,
+      overhead,
+      #logLines,
+      #output,
+      truncate_line(processMaxLine)
+    ))
   end
 
   ---@type ParsedReport
