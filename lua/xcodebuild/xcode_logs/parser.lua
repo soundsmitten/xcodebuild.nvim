@@ -139,6 +139,10 @@ local allExtensions = {
   "storyboard",
   "xib",
 }
+local allExtensionsSet = {}
+for _, extension in ipairs(allExtensions) do
+  allExtensionsSet[extension] = true
+end
 local xcTestLogPattern = "%s+[%w_]+%[%d+:%d+%]"
 
 local DEBUG = false
@@ -592,8 +596,12 @@ local function parse_warning(line)
     return
   end
 
-  local filepath, lineNumber, columnNumber, message =
-    match_any(line, "(" .. filePattern .. "):(%d+):(%d*):? %w*%s*warning: (.*)", allExtensions)
+  local filepath, extension, lineNumber, columnNumber, message =
+    string.match(line, "^([^:]+%.([%w_]+)):(%d+):(%d*):? %w*%s*warning: (.*)")
+
+  if not allExtensionsSet[extension] then
+    filepath = nil
+  end
 
   if filepath and message and util.has_prefix(filepath, util.get_project_root()) then
     lineType = BUILD_WARNING
